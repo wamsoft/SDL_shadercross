@@ -39,7 +39,7 @@ else()
     set(_SHADERCROSS_EXT "tar.gz")
 endif()
 
-set(_SHADERCROSS_URL "https://github.com/${SHADERCROSS_GITHUB_REPO}/releases/download/${SHADERCROSS_VERSION}/shadercross-${_SHADERCROSS_PLATFORM}.${_SHADERCROSS_EXT}")
+set(_SHADERCROSS_URL "https://github.com/${SHADERCROSS_GITHUB_REPO}/releases/download/upstream-${SHADERCROSS_VERSION}/shadercross-${_SHADERCROSS_PLATFORM}.${_SHADERCROSS_EXT}")
 
 message(STATUS "Fetching shadercross binary from: ${_SHADERCROSS_URL}")
 

@@ -61,7 +61,7 @@ include(cmake/FindShadercrossBinary.cmake)
 ## リリース URL パターン
 
 ```
-https://github.com/yukidaore/SDL_shadercross/releases/download/<upstream-sha>/shadercross-<platform>.<ext>
+https://github.com/yukidaore/SDL_shadercross/releases/download/upstream-<sha>/shadercross-<platform>.<ext>
 ```
 
 ## 本家リポジトリ

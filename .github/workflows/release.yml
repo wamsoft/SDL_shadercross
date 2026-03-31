@@ -72,11 +72,12 @@ jobs:
 
           # Determine whether a build is needed
           SHOULD_BUILD=false
+          TAG="upstream-${UPSTREAM_SHA}"
           if [ "${{ github.event.inputs.force_build }}" == "true" ]; then
             echo "::notice::Force build requested"
             SHOULD_BUILD=true
-          elif gh release view "${UPSTREAM_SHA}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "::notice::Release for ${UPSTREAM_SHA} already exists, skipping"
+          elif gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::notice::Release for ${TAG} already exists, skipping"
           else
             echo "::notice::No release for upstream ${UPSTREAM_SHA_SHORT}, will build"
             SHOULD_BUILD=true
@@ -362,7 +363,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.sync.outputs.upstream_sha }}"
+          TAG="upstream-${{ needs.sync.outputs.upstream_sha }}"
+          SHA="${{ needs.sync.outputs.upstream_sha }}"
           SHORT="${{ needs.sync.outputs.upstream_sha_short }}"
           DATE="${{ needs.sync.outputs.build_date }}"
 
@@ -387,11 +389,11 @@ jobs:
             STATUS="${STATUS}- ❌ Linux x64 (${{ needs.build-linux.result }})\n"
           fi
 
-          printf "Automated build of SDL_shadercross from upstream commit \`%s\`\n\n" "${TAG}" > /tmp/notes.md
-          printf "**Upstream:** https://github.com/libsdl-org/SDL_shadercross/commit/%s\n\n" "${TAG}" >> /tmp/notes.md
+          printf "Automated build of SDL_shadercross from upstream commit \`%s\`\n\n" "${SHA}" > /tmp/notes.md
+          printf "**Upstream:** https://github.com/libsdl-org/SDL_shadercross/commit/%s\n\n" "${SHA}" >> /tmp/notes.md
           printf "### Build Status\n%b\n" "${STATUS}" >> /tmp/notes.md
           printf "### CMake FetchContent\n" >> /tmp/notes.md
-          printf '```cmake\nset(SHADERCROSS_VERSION "%s")\n```\n\n' "${TAG}" >> /tmp/notes.md
+          printf '```cmake\nset(SHADERCROSS_VERSION "%s")\n```\n\n' "${SHA}" >> /tmp/notes.md
           printf "See repository README for full FetchContent usage.\n" >> /tmp/notes.md
 
           gh release create "${TAG}" \

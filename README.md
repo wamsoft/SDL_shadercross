@@ -63,7 +63,7 @@ include(cmake/FindShadercrossBinary.cmake)
 ## Release URL Pattern
 
 ```
-https://github.com/yukidaore/SDL_shadercross/releases/download/<upstream-sha>/shadercross-<platform>.<ext>
+https://github.com/yukidaore/SDL_shadercross/releases/download/upstream-<sha>/shadercross-<platform>.<ext>
 ```
 
 ## Upstream
