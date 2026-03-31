@@ -1,0 +1,401 @@
+name: Sync & Release
+
+# This workflow lives on the "automation" branch (orphan, set as default).
+# It syncs the "main" branch with upstream via fast-forward,
+# then builds release binaries from main.
+
+on:
+  schedule:
+    # Daily at UTC 06:00 (JST 15:00)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if no new upstream commits'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Fast-forward sync: main ← upstream/main
+  # ─────────────────────────────────────────────
+  sync:
+    name: Sync upstream
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+      upstream_sha_short: ${{ steps.check.outputs.upstream_sha_short }}
+      build_date: ${{ steps.check.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync and check upstream
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/libsdl-org/SDL_shadercross.git 2>/dev/null || true
+          git fetch upstream main
+
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          UPSTREAM_SHA_SHORT=${UPSTREAM_SHA:0:8}
+          BUILD_DATE=$(date -u +%Y%m%d)
+
+          echo "upstream_sha=${UPSTREAM_SHA}" >> $GITHUB_OUTPUT
+          echo "upstream_sha_short=${UPSTREAM_SHA_SHORT}" >> $GITHUB_OUTPUT
+          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+
+          # Fast-forward main to upstream/main
+          LOCAL_SHA=$(git rev-parse HEAD)
+          if [ "${LOCAL_SHA}" != "${UPSTREAM_SHA}" ]; then
+            echo "::notice::Fast-forwarding main: ${LOCAL_SHA:0:8} -> ${UPSTREAM_SHA_SHORT}"
+            if ! git merge --ff-only upstream/main; then
+              echo "::error::Cannot fast-forward main. It may have diverged from upstream."
+              echo "::error::Please manually reset main to upstream/main."
+              exit 1
+            fi
+            git push origin main
+          else
+            echo "::notice::main is up to date with upstream"
+          fi
+
+          # Determine whether a build is needed
+          SHOULD_BUILD=false
+          if [ "${{ github.event.inputs.force_build }}" == "true" ]; then
+            echo "::notice::Force build requested"
+            SHOULD_BUILD=true
+          elif gh release view "${UPSTREAM_SHA}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::notice::Release for ${UPSTREAM_SHA} already exists, skipping"
+          else
+            echo "::notice::No release for upstream ${UPSTREAM_SHA_SHORT}, will build"
+            SHOULD_BUILD=true
+          fi
+
+          echo "should_build=${SHOULD_BUILD}" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────
+  # Windows x64 (MSVC, non-vendored + prebuilt DXC)
+  # ─────────────────────────────────────────────
+  build-windows:
+    name: Build Windows x64
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Set up Ninja
+        shell: bash
+        run: |
+          NINJA_VER="1.12.1"
+          curl -fsSL "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VER}/ninja-win.zip" -o ninja.zip
+          unzip -q ninja.zip -d "${HOME}/ninja-bin"
+          echo "${HOME}/ninja-bin" >> $GITHUB_PATH
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up SDL
+        id: sdl
+        uses: libsdl-org/setup-sdl@main
+        with:
+          cmake-generator: Ninja
+          version: 3-head
+          sdl-test: true
+          shell: sh
+
+      - name: Download DirectXShaderCompiler binaries
+        run: |
+          cmake -P build-scripts/download-prebuilt-DirectXShaderCompiler.cmake
+          echo "DirectXShaderCompiler_ROOT=${PWD}/external/DirectXShaderCompiler-binaries" >>${GITHUB_ENV}
+
+      - name: Build SPIRV-Cross
+        run: |
+          cmake -S external/SPIRV-Cross -B spirv_cross_build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPIRV_CROSS_SHARED=ON \
+            -DSPIRV_CROSS_STATIC=ON \
+            -DCMAKE_INSTALL_PREFIX=${PWD}/spirv_cross_prefix
+          cmake --build spirv_cross_build
+          cmake --install spirv_cross_build
+
+          spirv_cross_prefix=$(cygpath -w "${PWD}/spirv_cross_prefix")
+          echo "spirv_cross_c_shared_ROOT=${spirv_cross_prefix};${spirv_cross_prefix}/share/spirv_cross_c_shared" >>${GITHUB_ENV}
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDLSHADERCROSS_VENDORED=OFF \
+            -DSDLSHADERCROSS_DXC=ON \
+            -DSDLSHADERCROSS_CLI=ON \
+            -DSDLSHADERCROSS_SHARED=ON \
+            -DSDLSHADERCROSS_STATIC=ON \
+            -DSDLSHADERCROSS_INSTALL=ON \
+            -DSDLSHADERCROSS_INSTALL_RUNTIME=ON \
+            -DSDLSHADERCROSS_INSTALL_CPACK=ON \
+            -DCMAKE_INSTALL_PREFIX="${PWD}/prefix"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel --verbose
+
+      - name: Package (CPack)
+        run: cmake --build build/ --target package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: shadercross-windows-x64
+          path: build/dist/SDL3_shadercross-*
+
+  # ─────────────────────────────────────────────
+  # macOS Universal (vendored, builds DXC from source ~30-60min)
+  # ─────────────────────────────────────────────
+  build-macos:
+    name: Build macOS (Universal)
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Set up Ninja
+        run: |
+          NINJA_VER="1.12.1"
+          curl -fsSL "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VER}/ninja-mac.zip" -o ninja.zip
+          unzip -q ninja.zip -d "${HOME}/ninja-bin"
+          echo "${HOME}/ninja-bin" >> $GITHUB_PATH
+
+      - name: Set up SDL
+        id: sdl
+        uses: libsdl-org/setup-sdl@main
+        with:
+          cmake-arguments: '-DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0'
+          cmake-generator: Ninja
+          version: 3-head
+          sdl-test: true
+          shell: sh
+
+      - name: Install macOS requirements
+        run: |
+          brew install bison cpanm
+          echo "/opt/homebrew/opt/bison/bin" >>$GITHUB_PATH
+          cpanm install JSON
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDLSHADERCROSS_VENDORED=ON \
+            -DSDLSHADERCROSS_DXC=ON \
+            -DSDLSHADERCROSS_CLI=ON \
+            -DSDLSHADERCROSS_SHARED=ON \
+            -DSDLSHADERCROSS_STATIC=ON \
+            -DSDLSHADERCROSS_INSTALL=ON \
+            -DSDLSHADERCROSS_INSTALL_RUNTIME=ON \
+            -DSDLSHADERCROSS_INSTALL_CPACK=ON \
+            -DCMAKE_INSTALL_PREFIX="${PWD}/prefix" \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DCMAKE_C_FLAGS="-mmacosx-version-min=11.0" \
+            -DCMAKE_CXX_FLAGS="-mmacosx-version-min=11.0"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel --verbose
+
+      - name: Package (CPack)
+        run: cmake --build build/ --target package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: shadercross-macos
+          path: build/dist/SDL3_shadercross-*
+
+  # ─────────────────────────────────────────────
+  # Linux x64 (non-vendored + prebuilt DXC, Ubuntu 24.04)
+  # ─────────────────────────────────────────────
+  build-linux:
+    name: Build Linux x64
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Set up Ninja
+        run: |
+          NINJA_VER="1.12.1"
+          curl -fsSL "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VER}/ninja-linux.zip" -o ninja.zip
+          unzip -q ninja.zip -d "${HOME}/ninja-bin"
+          echo "${HOME}/ninja-bin" >> $GITHUB_PATH
+
+      - name: Set up SDL
+        id: sdl
+        uses: libsdl-org/setup-sdl@main
+        with:
+          cmake-generator: Ninja
+          version: 3-head
+          sdl-test: true
+          shell: sh
+          install-linux-dependencies: true
+
+      - name: Install Linux requirements
+        run: |
+          wget https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz
+          tar xf patchelf-0.18.0-x86_64.tar.gz ./bin/patchelf
+          echo "${PWD}/bin" >>$GITHUB_PATH
+          sudo apt-get update -y
+          sudo apt-get install -y patchelf libxrandr-dev libjson-perl
+
+      - name: Download DirectXShaderCompiler binaries
+        run: |
+          cmake -P build-scripts/download-prebuilt-DirectXShaderCompiler.cmake
+          echo "DirectXShaderCompiler_ROOT=${PWD}/external/DirectXShaderCompiler-binaries" >>${GITHUB_ENV}
+
+      - name: Build SPIRV-Cross
+        run: |
+          cmake -S external/SPIRV-Cross -B spirv_cross_build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPIRV_CROSS_SHARED=ON \
+            -DSPIRV_CROSS_STATIC=ON \
+            -DCMAKE_INSTALL_PREFIX=${PWD}/spirv_cross_prefix
+          cmake --build spirv_cross_build
+          cmake --install spirv_cross_build
+          echo "spirv_cross_c_shared_ROOT=${PWD}/spirv_cross_prefix:${PWD}/spirv_cross_prefix/share/spirv_cross_c_shared" >>${GITHUB_ENV}
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDLSHADERCROSS_VENDORED=OFF \
+            -DSDLSHADERCROSS_DXC=ON \
+            -DSDLSHADERCROSS_CLI=ON \
+            -DSDLSHADERCROSS_SHARED=ON \
+            -DSDLSHADERCROSS_STATIC=ON \
+            -DSDLSHADERCROSS_INSTALL=ON \
+            -DSDLSHADERCROSS_INSTALL_RUNTIME=ON \
+            -DSDLSHADERCROSS_INSTALL_CPACK=ON \
+            -DCMAKE_INSTALL_PREFIX="${PWD}/prefix"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel --verbose
+
+      - name: Package (CPack)
+        run: cmake --build build/ --target package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: shadercross-linux-x64
+          path: build/dist/SDL3_shadercross-*
+
+  # ─────────────────────────────────────────────
+  # Create release (runs if at least one platform succeeded)
+  # ─────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: [sync, build-windows, build-macos, build-linux]
+    if: |
+      always() &&
+      needs.sync.outputs.should_build == 'true' &&
+      (needs.build-windows.result == 'success' || needs.build-macos.result == 'success' || needs.build-linux.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+
+          if [ -d "artifacts/shadercross-windows-x64" ]; then
+            for f in artifacts/shadercross-windows-x64/SDL3_shadercross-*.zip; do
+              [ -f "$f" ] && cp "$f" "release-assets/shadercross-windows-x64.zip"
+            done
+          fi
+
+          if [ -d "artifacts/shadercross-macos" ]; then
+            for f in artifacts/shadercross-macos/SDL3_shadercross-*.tar.gz; do
+              [ -f "$f" ] && cp "$f" "release-assets/shadercross-macos.tar.gz"
+            done
+            for f in artifacts/shadercross-macos/SDL3_shadercross-*.dmg; do
+              [ -f "$f" ] && cp "$f" "release-assets/shadercross-macos.dmg"
+            done
+          fi
+
+          if [ -d "artifacts/shadercross-linux-x64" ]; then
+            for f in artifacts/shadercross-linux-x64/SDL3_shadercross-*.tar.gz; do
+              [ -f "$f" ] && cp "$f" "release-assets/shadercross-linux-x64.tar.gz"
+            done
+          fi
+
+          echo "=== Release assets ==="
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.sync.outputs.upstream_sha }}"
+          SHORT="${{ needs.sync.outputs.upstream_sha_short }}"
+          DATE="${{ needs.sync.outputs.build_date }}"
+
+          if [ "${{ github.event.inputs.force_build }}" == "true" ]; then
+            gh release delete "${TAG}" --yes --cleanup-tag --repo "${{ github.repository }}" 2>/dev/null || true
+          fi
+
+          STATUS=""
+          if [ "${{ needs.build-windows.result }}" == "success" ]; then
+            STATUS="${STATUS}- ✅ Windows x64\n"
+          else
+            STATUS="${STATUS}- ❌ Windows x64 (${{ needs.build-windows.result }})\n"
+          fi
+          if [ "${{ needs.build-macos.result }}" == "success" ]; then
+            STATUS="${STATUS}- ✅ macOS (Universal)\n"
+          else
+            STATUS="${STATUS}- ❌ macOS (${{ needs.build-macos.result }})\n"
+          fi
+          if [ "${{ needs.build-linux.result }}" == "success" ]; then
+            STATUS="${STATUS}- ✅ Linux x64\n"
+          else
+            STATUS="${STATUS}- ❌ Linux x64 (${{ needs.build-linux.result }})\n"
+          fi
+
+          printf "Automated build of SDL_shadercross from upstream commit \`%s\`\n\n" "${TAG}" > /tmp/notes.md
+          printf "**Upstream:** https://github.com/libsdl-org/SDL_shadercross/commit/%s\n\n" "${TAG}" >> /tmp/notes.md
+          printf "### Build Status\n%b\n" "${STATUS}" >> /tmp/notes.md
+          printf "### CMake FetchContent\n" >> /tmp/notes.md
+          printf '```cmake\nset(SHADERCROSS_VERSION "%s")\n```\n\n' "${TAG}" >> /tmp/notes.md
+          printf "See repository README for full FetchContent usage.\n" >> /tmp/notes.md
+
+          gh release create "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "Build ${DATE} (${SHORT})" \
+            --notes-file /tmp/notes.md \
+            release-assets/*
