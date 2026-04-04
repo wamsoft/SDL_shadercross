@@ -34,11 +34,11 @@ include(FetchContent)
 set(SHADERCROSS_VERSION "<upstream-commit-sha>")
 
 if(WIN32)
-    set(_SC_URL "https://github.com/yukidaore/SDL_shadercross/releases/download/${SHADERCROSS_VERSION}/shadercross-windows-x64.zip")
+    set(_SC_URL "https://github.com/wamsoft/SDL_shadercross/releases/download/${SHADERCROSS_VERSION}/shadercross-windows-x64.zip")
 elseif(APPLE)
-    set(_SC_URL "https://github.com/yukidaore/SDL_shadercross/releases/download/${SHADERCROSS_VERSION}/shadercross-macos.tar.gz")
+    set(_SC_URL "https://github.com/wamsoft/SDL_shadercross/releases/download/${SHADERCROSS_VERSION}/shadercross-macos.tar.gz")
 else()
-    set(_SC_URL "https://github.com/yukidaore/SDL_shadercross/releases/download/${SHADERCROSS_VERSION}/shadercross-linux-x64.tar.gz")
+    set(_SC_URL "https://github.com/wamsoft/SDL_shadercross/releases/download/${SHADERCROSS_VERSION}/shadercross-linux-x64.tar.gz")
 endif()
 
 FetchContent_Declare(shadercross_bin URL "${_SC_URL}" DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
@@ -63,7 +63,7 @@ include(cmake/FindShadercrossBinary.cmake)
 ## Release URL Pattern
 
 ```
-https://github.com/yukidaore/SDL_shadercross/releases/download/upstream-<sha>/shadercross-<platform>.<ext>
+https://github.com/wamsoft/SDL_shadercross/releases/download/upstream-<sha>/shadercross-<platform>.<ext>
 ```
 
 ## Upstream
