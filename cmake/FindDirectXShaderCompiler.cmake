@@ -22,7 +22,7 @@ if(WIN32)
         DirectXShaderCompiler_dxil_BINARY
     )
 else()
-    find_path(DirectXShaderCompiler_INCLUDE_PATH NAMES "dxcapi.h" PATH_SUFFIXES "include" "include/dxc" "linux/include" "linux/include/dxc")
+    find_path(DirectXShaderCompiler_INCLUDE_PATH NAMES "dxcapi.h" PATH_SUFFIXES "include" "include/dxc" "linux/include" "linux/include/dxc" HINTS ${DirectXShaderCompiler_ROOT})
     find_library(DirectXShaderCompiler_dxcompiler_LIBRARY NAMES "dxcompiler" PATH_SUFFIXES "lib" "linux/lib" HINTS ${DirectXShaderCompiler_ROOT})
     find_library(DirectXShaderCompiler_dxil_LIBRARY NAMES "dxil" PATH_SUFFIXES "lib" "linux/lib" HINTS ${DirectXShaderCompiler_ROOT})
     set(required_vars
